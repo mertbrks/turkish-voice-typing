@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+# kişisel: damlanın bu bilgisayardaki yeri
+konum.txt
+# kişisel ekran görüntüsü
+örnek görsel.png
