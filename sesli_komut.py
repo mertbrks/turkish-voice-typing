@@ -215,6 +215,111 @@ def oynat_resmi(stil, durum, t, olcek=1.0, kx=0.0, ky=0.0, ustunde=False):
     return im.resize((OW, OW), Image.LANCZOS)
 
 
+# damladan kopan damlacık: sağ kenar çizimindeki kapsamı (damla penceresi x 0..D+EK, y 0..L)
+BX0, BX1, BY0, BY1 = -22, D + EK, -31, L // 2
+B_MERKEZ = (10.0, 0.0)   # durgun damlacığın merkezi: damlanın üst ucunun hemen solu
+B_KOK = 0.26             # boynun damlaya bağlandığı yer (damla boyunca; 0 üst uç)
+BS = 3                   # yumuşak kenar için kaç kat büyük çizilir (her karede hesaplandığı için SS'ten küçük)
+
+
+def damla_derin(t, olcek, cekim, kayma):
+    # cam_govde'deki damla kavsinin aynısı: kenar boyunca t (0..1) noktasında damlanın derinliği
+    p = 0.5 + 0.17 * kayma
+    tw = np.clip(t, 0, 1) ** (np.log(0.5) / np.log(p))
+    return olcek * ((D - 2) + EK * cekim) * np.clip(np.sin(np.pi * tw), 0, 1) ** 1.4
+
+
+def _smin(a, b, k):
+    # iki şekli sıvı gibi kaynaştıran yumuşak birleşim
+    h = np.clip(0.5 + 0.5 * (b - a) / k, 0, 1)
+    return b * (1 - h) + a * h - k * h * (1 - h)
+
+
+def damlacik_resmi(kenar, gorunur, durum, t, d_olcek=1.0, cekim=0.0, kayma=0.0, kx=0.0, ky=0.0,
+                   ustunde=False, stil=OYNAT_STIL):
+    """Mikrofon damlasının üst ucundan ince boyunla kopan cam damlacık, içinde ▶ / ses çubukları / ■.
+    gorunur: 0 (damlanın içinde) .. 1 (yerinde); kx, ky: fareye doğru çekilme (sağ kenar çiziminde).
+    Damlanın kendi pikselleri boş bırakılır (onları damla penceresi çiziyor), boyun ona kesintisiz bağlanır.
+    Dönüş: (resim, pencerenin damla penceresine göre yeri, damlacık merkezinin resimdeki yeri)."""
+    kayma_ = -kayma if kenar == "alt" else kayma
+    W, H = BX1 - BX0, BY1 - BY0
+    yy, xx = np.mgrid[0:H * BS, 0:W * BS].astype(np.float32) / BS
+    xx, yy = xx + BX0, yy + BY0
+    dw = D + EK
+    sd_d = (dw - damla_derin(yy / L, d_olcek, cekim, kayma_)) - xx       # damlanın içinde negatif
+    ax, ay = dw - float(damla_derin(B_KOK, d_olcek, cekim, kayma_)) + 2, B_KOK * L   # boyun kökü (damlanın biraz içi)
+    g = belirme(gorunur)                                               # çıkarken hafif taşıp yerine oturur
+    canli = durum == "caliyor"
+    sal = 0.8 * np.sin(t * 2 * np.pi * 0.55)                           # hafif süzülme
+    bx = ax + (B_MERKEZ[0] + kx - ax) * g
+    by = ay + (B_MERKEZ[1] + ky + sal - ay) * g
+    r = OR * 0.9 * max(min(gorunur * 1.4, 1.0), 0.05)
+    r *= 1 + (0.05 * abs(np.sin(t * 6)) if canli else 0.03 * np.sin(t * 2 * np.pi * 0.8))
+    w = 0.05 * np.sin(t * 2 * np.pi * (1.6 if canli else 0.7))         # jöle: biri uzarken öbürü kısalır
+    rx, ry = r, r                                                      # parlama için
+    # mikrofona meyil: boyun yönünde (damlaya bakan taraf) uzayan gözyaşı biçimi
+    n = max(np.hypot(ax - bx, ay - by), 1e-3)
+    ux, uy = (ax - bx) / n, (ay - by) / n
+    u = (xx - bx) * ux + (yy - by) * uy
+    v = (yy - by) * ux - (xx - bx) * uy
+    ru = np.where(u > 0, r * (1.16 + w), r * (0.97 + w))
+    rv = r * (0.95 - w)
+    sd_b = (np.hypot(u / ru, v / rv) - 1) * rv
+    vx, vy = bx - ax, by - ay
+    h = np.clip(((xx - ax) * vx + (yy - ay) * vy) / (vx * vx + vy * vy + 1e-6), 0, 1)
+    boyun = (3.4 + 0.6 * np.sin(t * 2.3)) * min(1.0, gorunur * 2) * (1 - 0.35 * np.sin(np.pi * h))  # ortası incelir
+    sd_n = np.hypot(xx - ax - vx * h, yy - ay - vy * h) - boyun
+    d = _smin(_smin(sd_b, sd_n, 5), sd_d, 6)
+    ic = (d < 0) & (sd_d >= 0)
+    tt = np.clip(yy / L, 0, 1)
+    renk_ = np.array([int(VURGU[i:i + 2], 16) for i in (1, 3, 5)], np.float32)
+    taban = renk_ * 0.75 + 255 * 0.25
+    a = np.where(ic, 180 - 55 * tt, 0)
+    kenar_isik = (ic & (-d < 1.1)) * (0.9 - 0.6 * tt)
+    parlama = ic * 0.55 * np.exp(-(((xx - (bx - 0.3 * rx)) / (0.42 * rx)) ** 2 + ((yy - (by - 0.45 * ry)) / (0.24 * ry)) ** 2))
+    golge = (ic & (-d >= 1.1) & (-d < 3.2) & (yy > by)) * 0.15
+    beyaz = np.maximum(kenar_isik, parlama)
+    rgb = (taban * (1 - beyaz[..., None]) + 255 * beyaz[..., None]) * (1 - golge[..., None])
+    a = a + (255 - a) * beyaz * ic
+    if stil == "dalga" and gorunur >= 1:  # damlacıktan dışa yayılan halkalar; okurken hızlanır
+        acik = renk_ * 0.7 + 255 * 0.3
+        uz = np.hypot(xx - bx, yy - by)
+        dis = (d >= 0) & (sd_d >= 0)
+        for k in range(2):
+            f = (t * (0.9 if canli else 0.45) + k / 2) % 1
+            halka = (dis & (np.abs(uz - (r + 2 + f * 12)) < 0.75)) * 1.0
+            ha = halka * (1 - f) ** 2 * (210 if canli else 150)
+            yeni = ha > a
+            rgb = np.where(yeni[..., None], acik, rgb)
+            a = np.maximum(a, ha)
+    im = Image.fromarray(np.dstack([rgb, a]).clip(0, 255).astype(np.uint8), "RGBA")
+    im = {"sag": lambda: im, "sol": lambda: im.transpose(Image.FLIP_LEFT_RIGHT),
+          "ust": lambda: im.rotate(90, expand=True), "alt": lambda: im.rotate(-90, expand=True)}[kenar]()
+    kose = [cevir(kenar, x, y) for x in (BX0, BX1) for y in (BY0, BY1)]
+    ox, oy = min(k[0] for k in kose), min(k[1] for k in kose)
+    mx_, my_ = cevir(kenar, bx, by)
+    cx, cy = mx_ - ox, my_ - oy
+    c = ImageDraw.Draw(im)
+    s = lambda *v: [n * BS for n in v]
+    beyaz_ = (255, 255, 255, 245)
+    if gorunur < 0.8:
+        pass
+    elif durum == "hazirlaniyor":
+        bas = (t * 400) % 360
+        c.arc(s(cx - 6, cy - 6, cx + 6, cy + 6), bas, bas + 260, fill=beyaz_, width=int(1.8 * BS))
+    elif canli and ustunde:
+        c.rounded_rectangle(s(cx - 4.2, cy - 4.2, cx + 4.2, cy + 4.2), radius=1.5 * BS, fill=beyaz_)
+    elif canli:
+        for i in range(4):
+            hh = 1.5 + 5 * (0.5 + 0.5 * np.sin(t * 9 + i * 1.9))
+            x = cx + (i - 1.5) * 4
+            c.rounded_rectangle(s(x - 1.1, cy - hh, x + 1.1, cy + hh), radius=1.1 * BS, fill=beyaz_)
+    else:
+        c.polygon(s(cx - 3.2, cy - 5.6, cx - 3.2, cy + 5.6, cx + 6, cy), fill=beyaz_)
+    im = im.resize((im.width // BS, im.height // BS), Image.LANCZOS)
+    return im, (round(ox), round(oy)), (cx, cy)
+
+
 def belirme(p):
     # 0..1 → üstünden aşıp yerine oturan yay (jöle gibi "pop")
     return 1.0 if p >= 1 else float(1 - np.exp(-6 * p) * np.cos(9 * p))
@@ -471,6 +576,11 @@ class Uygulama:
         threading.Thread(target=self.kisayol_dinle, daemon=True).start()
         self.ses_no, self.caliyor, self.bekle = 0, False, False
         self.cevap_zaman = self.dosya_zamani()  # açılıştan önceki cevabı okuma
+        try:
+            with open(CEVAP_DOSYA, encoding="utf-8") as f:
+                self.cevap_metin = f.read()
+        except OSError:
+            self.cevap_metin = None
         self.cevap_bak()
         self.ciz()
 
@@ -513,7 +623,8 @@ class Uygulama:
         self.oynat.attributes("-topmost", True)
         self.oynat.geometry(f"{OW}x{OW}+0+0")
         self.oynat.bind("<ButtonRelease-1>", lambda e: self.oku())
-        self.oynat_acik, self.oynat_zaman, self.okx, self.oky = False, None, 0.0, 0.0
+        self.oynat_acik, self.oynat_kapan, self.oynat_zaman, self.okx, self.oky = False, None, None, 0.0, 0.0
+        self.oynat_poz, self.b_merkez, self.d_durum = None, (-10 ** 6, -10 ** 6), (1.0, 0.0, 0.0)
         self.kok.update()
         odak_alma(self.mini)
         odak_alma(self.balon)
@@ -621,19 +732,12 @@ class Uygulama:
         win32gui.SetWindowPos(kabuk(self.balon), win32con.HWND_TOPMOST, x, y, g, y_, win32con.SWP_NOACTIVATE)
 
     def oynat_yerlestir(self):
-        # damlanın ekrana bakan yanında, biraz yukarıda (durum baloncuğuyla çakışmasın)
-        x, y = self.yanina(OW, OW, EK + 3 - (OW - 2 * OR) // 2)
-        if self.kenar in ("sag", "sol"):
-            y -= L // 2 + 2
-        elif self.kenar in ("ust", "alt"):
-            x -= L // 2 + 2
-        x, y = ekrana_sigdir(x, y, OW, OW)
-        win32gui.SetWindowPos(kabuk(self.oynat), win32con.HWND_TOPMOST, x, y, OW, OW, win32con.SWP_NOACTIVATE)
+        self.oynat_poz = None  # bir sonraki karede damlanın yeni yerine göre konumlanır
 
     def oynat_goster(self, sure=60000):
         self.oynat_zaman_iptal()
-        if not self.oynat_acik:
-            self.oynat_acik, self.oynat_t0 = True, time.time()
+        if not self.oynat_acik or self.oynat_kapan:
+            self.oynat_acik, self.oynat_kapan, self.oynat_t0 = True, None, time.time()
             self.oynat_yerlestir()
             self.oynat_ciz()
         if not self.caliyor or self.bekle:
@@ -648,26 +752,51 @@ class Uygulama:
         self.oynat_zaman_iptal()
         if self.bekle:  # ▶'ye basılmadan kapandı: hazırlanan sesi at
             self.dur()
-        self.oynat_acik = False
-        katmana_bas(kabuk(self.oynat), Image.new("RGBA", (OW, OW)))  # saydam pikseller tıklamayı da geçirir
+        if self.oynat_acik and not self.oynat_kapan:
+            self.oynat_kapan = time.time()  # damlacık 0.3 sn'de damlanın içine geri çekilir (oynat_ciz)
 
     def oynat_ciz(self):
         t = time.time()
+        if self.oynat_kapan:
+            gor = 1 - (t - self.oynat_kapan) / 0.3
+            if gor <= 0:
+                self.oynat_acik = self.oynat_kapan = False
+                # SW_HIDE yerine tamamen saydam kare; saydam pikseller tıklamayı da geçirir
+                return katmana_bas(kabuk(self.oynat), Image.new("RGBA", (OW, OW)))
+        else:
+            gor = min(1.0, (t - self.oynat_t0) / 0.6)
         if self.caliyor and not self.bekle:
-            durum = "caliyor" if self.ses_yol else "hazirlaniyor"
+            durum = "caliyor" if self.calmis else "hazirlaniyor"
         else:
             durum = "hazir"
         try:
             px, py = win32api.GetCursorPos()
         except Exception:  # kilit ekranında imleç okunamaz
             px, py = -10 ** 6, -10 ** 6
-        cx, cy = self.oynat.winfo_rootx() + OW / 2, self.oynat.winfo_rooty() + OW / 2
-        uzak = float(np.hypot(px - cx, py - cy))
-        # mıknatıs: fare yaklaşınca top ona doğru birkaç piksel kayar
-        g = max(0.0, 1 - uzak / 130) * 3.5 / max(uzak, 1)
-        self.okx += ((px - cx) * g - self.okx) * 0.25
-        self.oky += ((py - cy) * g - self.oky) * 0.25
-        im = oynat_resmi(OYNAT_STIL, durum, t, belirme((t - self.oynat_t0) / 0.45), self.okx, self.oky, uzak < OR + 3)
+        bcx, bcy = self.b_merkez
+        uzak = float(np.hypot(px - bcx, py - bcy))
+        g = max(0.0, 1 - uzak / 110) * 4 / max(uzak, 1)  # mıknatıs: fareye doğru birkaç piksel çekilir
+        dx, dy = (px - bcx) * g, (py - bcy) * g
+        if "-" in self.kenar:  # shortcut: köşede boyun çizilmiyor, damlanın yanında serbest cam top
+            x, y = self.yanina(OW, OW, EK + 3 - (OW - 2 * OR) // 2)
+            x, y = ekrana_sigdir(x, y - OW // 2, OW, OW)
+            self.okx += (dx - self.okx) * 0.25
+            self.oky += (dy - self.oky) * 0.25
+            im = oynat_resmi(OYNAT_STIL, durum, t, belirme(gor), self.okx, self.oky, uzak < OR + 3)
+            self.b_merkez = (x + OW / 2, y + OW / 2)
+        else:
+            # ekran yönündeki çekmeyi damlacığın çizildiği sağ kenar düzlemine çevir
+            dx, dy = {"sag": (dx, dy), "sol": (-dx, dy), "ust": (-dy, dx), "alt": (dy, -dx)}[self.kenar]
+            self.okx += (dx - self.okx) * 0.25
+            self.oky += (dy - self.oky) * 0.25
+            im, (ox, oy), (icx, icy) = damlacik_resmi(self.kenar, gor, durum, t, *self.d_durum,
+                                                       self.okx, self.oky, uzak < OR + 3)
+            x, y = self.mini.winfo_x() + ox, self.mini.winfo_y() + oy
+            self.b_merkez = (x + icx, y + icy)
+        poz = (x, y, im.width, im.height)
+        if poz != self.oynat_poz:
+            self.oynat_poz = poz
+            win32gui.SetWindowPos(kabuk(self.oynat), win32con.HWND_TOPMOST, *poz, win32con.SWP_NOACTIVATE)
         katmana_bas(kabuk(self.oynat), im)
 
     def balon_goster(self, metin, sure=2500):
@@ -694,6 +823,14 @@ class Uygulama:
         z = self.dosya_zamani()
         if z != self.cevap_zaman:
             self.cevap_zaman = z
+            try:
+                with open(CEVAP_DOSYA, encoding="utf-8") as f:
+                    metin = f.read()
+            except OSError:
+                metin = self.cevap_metin
+            if metin == self.cevap_metin:  # OneDrive dosyaya dokunup saatini değiştiriyor; içerik aynıysa yeni cevap değil
+                return self.kok.after(700, self.cevap_bak)
+            self.cevap_metin = metin
             self.dur()
             self.oku(bekle=not self.seslendir)  # okuma kapalıysa da sesi önceden hazırla: ▶ anında çalsın
             self.oynat_goster()
@@ -716,8 +853,12 @@ class Uygulama:
         if self.caliyor:
             if self.bekle:  # ses önceden hazırlanmıştı: ▶ ile başlat
                 self.bekle = False
+                if self.ses_yol and not self.caldi:  # önceden açılmış ses: sıradaki turu bekleme
+                    _mci("play cevap", None, 0, None)
+                    self.caldi = self.calmis = True
                 return self.oynat_zaman_iptal()
-            return self.dur()  # okurken ya da hazırlanırken tıklama: durdur
+            self.dur()  # okurken ya da hazırlanırken tıklama: durdur
+            return self.oynat_goster()  # damlacık kalsın, 1 dk sonra kaybolsun
         try:
             with open(CEVAP_DOSYA, encoding="utf-8") as f:
                 metin = okunur(f.read())
@@ -729,7 +870,7 @@ class Uygulama:
         self.caliyor, self.bekle = True, bekle
         if not bekle:
             self.oynat_zaman_iptal()
-        self.sira, self.ses_yol = [], None
+        self.sira, self.ses_yol, self.calmis = [], None, False
         threading.Thread(target=self.ses_uret, args=(metin, self.ses_no), daemon=True).start()
         self.cal_bak(self.ses_no)
 
@@ -766,22 +907,26 @@ class Uygulama:
         # MCI: Windows'un kendi oynatıcısı; ek paket gerekmez, açma/çalma/kapama hep bu (Tk) iş parçacığında
         if no != self.ses_no:
             return
-        b = ctypes.create_unicode_buffer(32)
-        _mci("status cevap mode", b, 32, None)
-        if b.value != "playing" and not self.bekle:
-            if self.ses_yol:
-                _mci("close cevap", None, 0, None)
-                sil(self.ses_yol)
-                self.ses_yol = None
-            if self.sira:
-                yol = self.sira.pop(0)
-                if yol is None:
-                    self.dur()
-                    self.oynat_zaman = self.kok.after(4000, self.oynat_gizle)
-                    return
-                _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
+        if self.ses_yol is None and self.sira:
+            yol = self.sira.pop(0)
+            if yol is None:
+                self.dur()
+                self.oynat_zaman = self.kok.after(4000, self.oynat_gizle)
+                return
+            # açmak ~0.3 sn sürüyor (arayüz donar): ▶ beklerken önceden açılır, basınca anında çalar
+            _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
+            self.ses_yol, self.caldi = yol, False
+        if self.ses_yol and not self.bekle:
+            if not self.caldi:
                 _mci("play cevap", None, 0, None)
-                self.ses_yol = yol
+                self.caldi = self.calmis = True
+            else:
+                b = ctypes.create_unicode_buffer(32)
+                _mci("status cevap mode", b, 32, None)
+                if b.value != "playing":  # bu parça bitti; sıradaki bir sonraki turda açılır
+                    _mci("close cevap", None, 0, None)
+                    sil(self.ses_yol)
+                    self.ses_yol = None
         self.kok.after(120, self.cal_bak, no)
 
     def dur(self):
@@ -841,6 +986,7 @@ class Uygulama:
         cekim, kayma = round(self.cek * 6) / 6, round(self.kay * 4) / 4
         oynuyor = abs(yakin - self.cek) > 0.02 or abs(hedef_kay - self.kay) > 0.02
         anahtar = (self.kenar, renk, cubuklar, olcek, cekim, kayma)
+        self.d_durum = (olcek, cekim, kayma)  # damlacığın boynu damlanın o anki şekline otursun
         if anahtar != self.m_anahtar:  # boştayken her karede değil, değişince bas
             self.m_anahtar = anahtar
             katmana_bas(kabuk(self.mini), damla_resmi(self.kenar, renk, cubuklar, olcek, cekim, kayma))
