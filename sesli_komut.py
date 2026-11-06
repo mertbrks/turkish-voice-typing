@@ -219,7 +219,7 @@ def oynat_resmi(stil, durum, t, olcek=1.0, kx=0.0, ky=0.0, ustunde=False):
 BX0, BX1, BY0, BY1 = -22, D + EK, -31, L // 2
 B_MERKEZ = (10.0, 0.0)   # durgun damlacığın merkezi: damlanın üst ucunun hemen solu
 B_KOK = 0.26             # boynun damlaya bağlandığı yer (damla boyunca; 0 üst uç)
-BS = 3                   # yumuşak kenar için kaç kat büyük çizilir (her karede hesaplandığı için SS'ten küçük)
+BS = 2                   # yumuşak kenar için kaç kat büyük çizilir (her karede hesaplanır; 3'te ~17 ms, damlanın akışını kesiyordu)
 
 
 def damla_derin(t, olcek, cekim, kayma):
@@ -775,22 +775,28 @@ class Uygulama:
             px, py = -10 ** 6, -10 ** 6
         bcx, bcy = self.b_merkez
         uzak = float(np.hypot(px - bcx, py - bcy))
-        g = max(0.0, 1 - uzak / 110) * 4 / max(uzak, 1)  # mıknatıs: fareye doğru birkaç piksel çekilir
+        # mıknatıs: damlayla aynı mesafe (CEKIM_MESAFE) ve aynı yumuşatma (0.3), fareye doğru birkaç piksel
+        yakin = 0.0 if self.surukleniyor else min(1.0, max(0.0, 1 - (uzak - 25) / CEKIM_MESAFE))
+        g = 4 * yakin / max(uzak, 1)
         dx, dy = (px - bcx) * g, (py - bcy) * g
         if "-" in self.kenar:  # shortcut: köşede boyun çizilmiyor, damlanın yanında serbest cam top
             x, y = self.yanina(OW, OW, EK + 3 - (OW - 2 * OR) // 2)
             x, y = ekrana_sigdir(x, y - OW // 2, OW, OW)
-            self.okx += (dx - self.okx) * 0.25
-            self.oky += (dy - self.oky) * 0.25
+            self.okx += (dx - self.okx) * 0.3
+            self.oky += (dy - self.oky) * 0.3
             im = oynat_resmi(OYNAT_STIL, durum, t, belirme(gor), self.okx, self.oky, uzak < OR + 3)
             self.b_merkez = (x + OW / 2, y + OW / 2)
         else:
             # ekran yönündeki çekmeyi damlacığın çizildiği sağ kenar düzlemine çevir
             dx, dy = {"sag": (dx, dy), "sol": (-dx, dy), "ust": (-dy, dx), "alt": (dy, -dx)}[self.kenar]
-            self.okx += (dx - self.okx) * 0.25
-            self.oky += (dy - self.oky) * 0.25
+            self.okx += (dx - self.okx) * 0.3
+            self.oky += (dy - self.oky) * 0.3
+            # damla fareye uzayıp bombesi kaydıkça damlacık da onunla taşınır (ayrı ayrı oynamasın)
+            kay = -self.kay if self.kenar == "alt" else self.kay
+            kx = self.okx - EK * self.cek
+            ky = self.oky + 0.17 * L * 0.5 * kay
             im, (ox, oy), (icx, icy) = damlacik_resmi(self.kenar, gor, durum, t, *self.d_durum,
-                                                       self.okx, self.oky, uzak < OR + 3)
+                                                       kx, ky, uzak < OR + 3)
             x, y = self.mini.winfo_x() + ox, self.mini.winfo_y() + oy
             self.b_merkez = (x + icx, y + icy)
         poz = (x, y, im.width, im.height)
