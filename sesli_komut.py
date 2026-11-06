@@ -630,7 +630,7 @@ class Uygulama:
         x, y = ekrana_sigdir(x, y, OW, OW)
         win32gui.SetWindowPos(kabuk(self.oynat), win32con.HWND_TOPMOST, x, y, OW, OW, win32con.SWP_NOACTIVATE)
 
-    def oynat_goster(self, sure=30000):
+    def oynat_goster(self, sure=60000):
         self.oynat_zaman_iptal()
         if not self.oynat_acik:
             self.oynat_acik, self.oynat_t0 = True, time.time()
