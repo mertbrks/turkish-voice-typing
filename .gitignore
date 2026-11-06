@@ -4,3 +4,6 @@ __pycache__/
 konum.txt
 # kişisel ekran görüntüsü
 örnek görsel.png
+# Claude cevabı ve seslendirme ayarı (yerel)
+son_cevap.txt
+seslendir.acik

@@ -32,6 +32,10 @@ VK_V = 0x56
 VK_F9 = 0x78
 MOD_NOREPEAT = 0x4000  # tuş basılı kalınca tekrar tetiklemesin
 KONUM_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "konum.txt")
+CEVAP_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "son_cevap.txt")  # cevap_kaydet.py yazar
+SESLENDIR_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "seslendir.acik")  # varsa otomatik okur
+SES = "tr-TR-AhmetNeural"
+_mci = ctypes.windll.winmm.mciSendStringW
 # karşılaştırmadan önce sondaki nokta silinir; buradakiler de noktasız yazılmalı
 UYDURMA = {"izlediğiniz için teşekkür ederim", "izlediğiniz için teşekkürler", "altyazı m.k",
            "abone olmayı unutmayın", "teşekkürler", "teşekkür ederim"}
@@ -246,6 +250,20 @@ def ekrana_sigdir(x, y, g, y_):
     return max(sol, min(x, sol + gen - g)), max(ust, min(y, ust + yuk - y_))
 
 
+def okunur(metin):
+    """Markdown cevabı kulağa uygun düz metne çevirir: kod blokları, bağlantı adresleri, işaretler gider."""
+    metin = re.sub(r"```.*?(```|$)", " (kod) ", metin, flags=re.S)
+    metin = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", metin)       # [yazı](adres) → yazı
+    metin = re.sub(r"https?://\S+", "", metin)
+    metin = re.sub(r"^\s*(#+|[-*+>]|\d+\.)\s+", "", metin, flags=re.M)  # başlık, madde, alıntı
+    metin = re.sub(r"[`*_|#]+", " ", metin)
+    metin = re.sub(r"^[\s:-]+$", "", metin, flags=re.M)           # tablo ayırıcıları
+    return re.sub(r"\s+", " ", metin).strip()
+
+
+assert okunur("## Başlık\n- **kalın** `kod` [link](http://x)\n```py\nx=1\n```") == "Başlık kalın kod link (kod)"
+
+
 def seviye(veri):
     x = np.frombuffer(veri, np.int16).astype(np.float32)
     return float(np.sqrt(np.mean(x * x)))
@@ -329,6 +347,11 @@ class Uygulama:
         self.enter = True
         self.enter_btn = tk.Label(kok, bg=ARKA, font=("Segoe UI", 9), cursor="hand2", anchor="w")
         self.enter_btn.pack(fill="x", padx=18, pady=(10, 0))
+        self.seslendir = os.path.exists(SESLENDIR_DOSYA)
+        self.ses_btn = tk.Label(kok, bg=ARKA, font=("Segoe UI", 9), cursor="hand2", anchor="w")
+        self.ses_btn.pack(fill="x", padx=18, pady=(6, 0))
+        self.ses_btn.bind("<Button-1>", lambda e: self.seslendir_degis())
+        self.seslendir_degis(ilk=True)
 
         tk.Frame(kok, bg=CIZGI, height=1).pack(fill="x", padx=18, pady=10)
         self.durum = tk.Label(kok, text="Hazırlanıyor…", bg=ARKA, fg=YAZI, font=("Segoe UI", 10), anchor="w")
@@ -352,6 +375,9 @@ class Uygulama:
         self.yenile()
         threading.Thread(target=self.hazirla, daemon=True).start()
         threading.Thread(target=self.kisayol_dinle, daemon=True).start()
+        self.ses_no, self.caliyor = 0, False
+        self.cevap_zaman = self.dosya_zamani()  # açılıştan önceki cevabı okuma
+        self.cevap_bak()
         self.ciz()
 
     # --- küçük mikrofon ve baloncuk ---
@@ -385,7 +411,11 @@ class Uygulama:
         self.balon.attributes("-topmost", True)
         self.balon_yazi = tk.Label(self.balon, bg=KART, fg=YAZI, font=("Segoe UI", 10),
                                    padx=12, pady=6, wraplength=260, justify="left")
-        self.balon_yazi.pack()
+        self.balon_yazi.pack(side="left")
+        # Claude cevabı gelince baloncukta çıkan oynat/durdur tuşu
+        self.oynat_btn = tk.Label(self.balon, text="▶", bg=KART, fg=VURGU, font=("Segoe UI", 12),
+                                  padx=10, cursor="hand2")
+        self.oynat_btn.bind("<Button-1>", lambda e: self.oku())
         self.kok.update()
         odak_alma(self.mini)
         odak_alma(self.balon)
@@ -486,17 +516,117 @@ class Uygulama:
         # SW_HIDE ile gizlendikten sonra Tk konumu uygulamıyor (baloncuk ilk yerinde takılıyordu); Windows'a doğrudan ver
         win32gui.SetWindowPos(kabuk(self.balon), win32con.HWND_TOPMOST, x, y, g, y_, win32con.SWP_NOACTIVATE)
 
-    def balon_goster(self, metin):
+    def balon_goster(self, metin, oynat=False, sure=2500):
         if self.balon_zaman:
             self.kok.after_cancel(self.balon_zaman)
             self.balon_zaman = None
         if self.kok.state() == "normal":  # panel açıkken durum zaten orada yazıyor
             return
         self.balon_yazi.config(text=metin)
+        if oynat:
+            self.oynat_btn.pack(side="left")
+        else:
+            self.oynat_btn.pack_forget()
         self.balon_yerlestir()
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_SHOWNOACTIVATE)
-        if not (self.kayitta or self.mesgul):
-            self.balon_zaman = self.kok.after(2500, self.balon_gizle)
+        if not (self.kayitta or self.mesgul or self.caliyor):
+            self.balon_zaman = self.kok.after(sure, self.balon_gizle)
+
+    # --- Claude cevabını sesli okuma ---
+    def dosya_zamani(self):
+        try:
+            return os.path.getmtime(CEVAP_DOSYA)
+        except OSError:
+            return 0
+
+    def cevap_bak(self):
+        # cevap_kaydet.py (Claude Code Stop hook'u) dosyayı her cevapta yeniler
+        z = self.dosya_zamani()
+        if z != self.cevap_zaman:
+            self.cevap_zaman = z
+            self.dur()
+            self.balon_goster("Claude cevap verdi", oynat=True, sure=30000)
+            if self.seslendir:
+                self.oku()
+        self.kok.after(700, self.cevap_bak)
+
+    def seslendir_degis(self, ilk=False):
+        if not ilk:
+            self.seslendir = not self.seslendir
+            try:
+                if self.seslendir:
+                    open(SESLENDIR_DOSYA, "w").close()
+                else:
+                    os.remove(SESLENDIR_DOSYA)
+            except OSError:
+                pass  # ayar kaydedilemezse yalnızca bu açılışta geçerli
+        self.ses_btn.config(text=("●  Cevabı sesli oku" if self.seslendir else "○  Cevabı okuma (▶ ile dinle)"),
+                            fg=YAZI if self.seslendir else SOLUK)
+
+    def oku(self):
+        if self.caliyor:  # okurken ya da hazırlanırken tıklama: durdur
+            return self.dur()
+        try:
+            with open(CEVAP_DOSYA, encoding="utf-8") as f:
+                metin = okunur(f.read())
+        except OSError:
+            return
+        if not metin:
+            return
+        self.ses_no += 1
+        self.caliyor = True
+        if self.balon_zaman:
+            self.kok.after_cancel(self.balon_zaman)
+            self.balon_zaman = None
+        self.oynat_btn.config(text="…")
+        threading.Thread(target=self.ses_uret, args=(metin, self.ses_no), daemon=True).start()
+
+    def ses_uret(self, metin, no):
+        yol = os.path.join(os.environ.get("TEMP", "."), f"sesli_komut_{no}.mp3")
+        try:
+            import asyncio
+            import edge_tts
+            asyncio.run(edge_tts.Communicate(metin, SES).save(yol))
+        except Exception:
+            return self.kok.after(0, self.ses_hata, no)
+        self.kok.after(0, self.cal, yol, no)
+
+    def ses_hata(self, no):
+        if no == self.ses_no:
+            self.dur()
+            self.balon_goster("Seslendirilemedi (internet?)", oynat=True, sure=6000)
+
+    def cal(self, yol, no):
+        if no != self.ses_no:  # bu arada durduruldu ya da yeni cevap geldi
+            return os.remove(yol)
+        # MCI: Windows'un kendi oynatıcısı; ek paket gerekmez, açma/çalma/kapama hep bu (Tk) iş parçacığında
+        _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
+        _mci("play cevap", None, 0, None)
+        self.ses_yol = yol
+        self.oynat_btn.config(text="■")
+        self.cal_bak(no)
+
+    def cal_bak(self, no):
+        if no != self.ses_no:
+            return
+        b = ctypes.create_unicode_buffer(32)
+        _mci("status cevap mode", b, 32, None)
+        if b.value == "playing":
+            return self.kok.after(300, self.cal_bak, no)
+        self.dur()
+        self.balon_zaman = self.kok.after(4000, self.balon_gizle)
+
+    def dur(self):
+        self.ses_no += 1
+        self.caliyor = False
+        _mci("close cevap", None, 0, None)
+        if getattr(self, "ses_yol", None):
+            try:
+                os.remove(self.ses_yol)
+            except OSError:
+                pass
+            self.ses_yol = None
+        self.oynat_btn.config(text="▶")
 
     def balon_gizle(self):
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_HIDE)
@@ -592,6 +722,8 @@ class Uygulama:
             if self.secim.current() < 0:
                 return self.yaz_durum("Önce bir pencere seç.")
             self.hedef = self.liste[self.secim.current()][1]
+            if self.caliyor:
+                self.dur()  # mikrofon okunan cevabı duymasın
             self.kayitta = True
             threading.Thread(target=self.dinle, daemon=True).start()
         elif self.cozucu.ad == "yükleniyor":
