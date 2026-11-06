@@ -1123,8 +1123,23 @@ class Uygulama:
 if __name__ == "__main__":
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # ölçekli ekranda bulanık görünmesin
     _tek = ctypes.windll.kernel32.CreateMutexW(None, False, "SesliKomut.TekKopya")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS: zaten açık, ikinci damla olmasın
-        sys.exit(0)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # zaten açık: eski kopya görünmez kalmış olabilir, kapatıp temiz başla
+        import win32process
+        eskiler = set()
+        win32gui.EnumWindows(lambda h, _: eskiler.add(win32process.GetWindowThreadProcessId(h)[1])
+                             if win32gui.GetWindowText(h) == "Sesli Komut" else None, None)
+        eskiler.discard(os.getpid())
+        for pid in eskiler:
+            try:
+                h = win32api.OpenProcess(win32con.PROCESS_TERMINATE | win32con.SYNCHRONIZE, False, pid)
+                win32api.TerminateProcess(h, 0)
+                ctypes.windll.kernel32.WaitForSingleObject(int(h), 3000)
+            except Exception:
+                pass
+        ctypes.windll.kernel32.CloseHandle(_tek)
+        _tek = ctypes.windll.kernel32.CreateMutexW(None, False, "SesliKomut.TekKopya")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # eskisi kapanmadı: ikinci damla olmasın
+            sys.exit(0)
     kok = tk.Tk()
     Uygulama(kok)
     kok.mainloop()
