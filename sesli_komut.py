@@ -35,6 +35,7 @@ KONUM_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "konum
 CEVAP_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "son_cevap.txt")  # cevap_kaydet.py yazar
 SESLENDIR_DOSYA = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "seslendir.acik")  # varsa otomatik okur
 SES = "tr-TR-AhmetNeural"
+OKUMA_HIZI = "+20%"   # edge-tts varsayılanı Mert'e yavaş geldi
 _mci = ctypes.windll.winmm.mciSendStringW
 # karşılaştırmadan önce sondaki nokta silinir; buradakiler de noktasız yazılmalı
 UYDURMA = {"izlediğiniz için teşekkür ederim", "izlediğiniz için teşekkürler", "altyazı m.k",
@@ -264,6 +265,28 @@ def okunur(metin):
 assert okunur("## Başlık\n- **kalın** `kod` [link](http://x)\n```py\nx=1\n```") == "Başlık kalın kod link (kod)"
 
 
+def parcala(metin, sinir=350):
+    """İlk cümle tek başına (okuma hemen başlasın), gerisi ~sinir karakterlik gruplar."""
+    cumleler = [c for c in re.split(r"(?<=[.!?:])\s+", metin) if c]
+    parcalar, tampon = cumleler[:1], ""
+    for c in cumleler[1:]:
+        if tampon and len(tampon) + len(c) > sinir:
+            parcalar.append(tampon)
+            tampon = ""
+        tampon = f"{tampon} {c}".strip()
+    return parcalar + ([tampon] if tampon else [])
+
+
+assert parcala("Bir. İki! Üç?", 6) == ["Bir.", "İki!", "Üç?"] and parcala("Bir. İki. Üç.") == ["Bir.", "İki. Üç."]
+
+
+def sil(yol):
+    try:
+        os.remove(yol)
+    except OSError:
+        pass
+
+
 def seviye(veri):
     x = np.frombuffer(veri, np.int16).astype(np.float32)
     return float(np.sqrt(np.mean(x * x)))
@@ -375,7 +398,7 @@ class Uygulama:
         self.yenile()
         threading.Thread(target=self.hazirla, daemon=True).start()
         threading.Thread(target=self.kisayol_dinle, daemon=True).start()
-        self.ses_no, self.caliyor = 0, False
+        self.ses_no, self.caliyor, self.bekle = 0, False, False
         self.cevap_zaman = self.dosya_zamani()  # açılıştan önceki cevabı okuma
         self.cevap_bak()
         self.ciz()
@@ -529,7 +552,7 @@ class Uygulama:
             self.oynat_btn.pack_forget()
         self.balon_yerlestir()
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_SHOWNOACTIVATE)
-        if not (self.kayitta or self.mesgul or self.caliyor):
+        if not (self.kayitta or self.mesgul or (self.caliyor and not self.bekle)):
             self.balon_zaman = self.kok.after(sure, self.balon_gizle)
 
     # --- Claude cevabını sesli okuma ---
@@ -545,9 +568,8 @@ class Uygulama:
         if z != self.cevap_zaman:
             self.cevap_zaman = z
             self.dur()
+            self.oku(bekle=not self.seslendir)  # okuma kapalıysa da sesi önceden hazırla: ▶ anında çalsın
             self.balon_goster("Claude cevap verdi", oynat=True, sure=30000)
-            if self.seslendir:
-                self.oku()
         self.kok.after(700, self.cevap_bak)
 
     def seslendir_degis(self, ilk=False):
@@ -563,9 +585,13 @@ class Uygulama:
         self.ses_btn.config(text=("●  Cevabı sesli oku" if self.seslendir else "○  Cevabı okuma (▶ ile dinle)"),
                             fg=YAZI if self.seslendir else SOLUK)
 
-    def oku(self):
-        if self.caliyor:  # okurken ya da hazırlanırken tıklama: durdur
-            return self.dur()
+    def oku(self, bekle=False):
+        if self.caliyor:
+            if self.bekle:  # ses önceden hazırlanmıştı: ▶ ile başlat
+                self.bekle = False
+                self.oynat_btn.config(text="…")
+                return
+            return self.dur()  # okurken ya da hazırlanırken tıklama: durdur
         try:
             with open(CEVAP_DOSYA, encoding="utf-8") as f:
                 metin = okunur(f.read())
@@ -574,61 +600,79 @@ class Uygulama:
         if not metin:
             return
         self.ses_no += 1
-        self.caliyor = True
-        if self.balon_zaman:
+        self.caliyor, self.bekle = True, bekle
+        if self.balon_zaman and not bekle:
             self.kok.after_cancel(self.balon_zaman)
             self.balon_zaman = None
-        self.oynat_btn.config(text="…")
+        self.oynat_btn.config(text="▶" if bekle else "…")
+        self.sira, self.ses_yol = [], None
         threading.Thread(target=self.ses_uret, args=(metin, self.ses_no), daemon=True).start()
+        self.cal_bak(self.ses_no)
 
     def ses_uret(self, metin, no):
-        yol = os.path.join(os.environ.get("TEMP", "."), f"sesli_komut_{no}.mp3")
-        try:
-            import asyncio
-            import edge_tts
-            asyncio.run(edge_tts.Communicate(metin, SES).save(yol))
-        except Exception:
-            return self.kok.after(0, self.ses_hata, no)
-        self.kok.after(0, self.cal, yol, no)
+        # ilk cümle tek başına üretilir ki okuma hemen başlasın; gerisi o çalarken hazırlanır
+        import asyncio
+        import edge_tts
+        for i, parca in enumerate(parcala(metin)):
+            if no != self.ses_no:
+                return
+            yol = os.path.join(os.environ.get("TEMP", "."), f"sesli_komut_{no}_{i}.mp3")
+            try:
+                asyncio.run(edge_tts.Communicate(parca, SES, rate=OKUMA_HIZI).save(yol))
+            except Exception:
+                if i == 0:
+                    return self.kok.after(0, self.ses_hata, no)
+                break  # ortada koparsa okunan kadarıyla bitir
+            self.kok.after(0, self.sira_ekle, yol, no)
+        self.kok.after(0, self.sira_ekle, None, no)  # None: üretim bitti
+
+    def sira_ekle(self, yol, no):
+        if no == self.ses_no:
+            self.sira.append(yol)
+        elif yol:  # bu arada durduruldu ya da yeni cevap geldi
+            sil(yol)
 
     def ses_hata(self, no):
         if no == self.ses_no:
             self.dur()
             self.balon_goster("Seslendirilemedi (internet?)", oynat=True, sure=6000)
 
-    def cal(self, yol, no):
-        if no != self.ses_no:  # bu arada durduruldu ya da yeni cevap geldi
-            return os.remove(yol)
-        # MCI: Windows'un kendi oynatıcısı; ek paket gerekmez, açma/çalma/kapama hep bu (Tk) iş parçacığında
-        _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
-        _mci("play cevap", None, 0, None)
-        self.ses_yol = yol
-        self.oynat_btn.config(text="■")
-        self.cal_bak(no)
-
     def cal_bak(self, no):
+        # MCI: Windows'un kendi oynatıcısı; ek paket gerekmez, açma/çalma/kapama hep bu (Tk) iş parçacığında
         if no != self.ses_no:
             return
         b = ctypes.create_unicode_buffer(32)
         _mci("status cevap mode", b, 32, None)
-        if b.value == "playing":
-            return self.kok.after(300, self.cal_bak, no)
-        self.dur()
-        self.balon_zaman = self.kok.after(4000, self.balon_gizle)
+        if b.value != "playing" and not self.bekle:
+            if self.ses_yol:
+                _mci("close cevap", None, 0, None)
+                sil(self.ses_yol)
+                self.ses_yol = None
+            if self.sira:
+                yol = self.sira.pop(0)
+                if yol is None:
+                    self.dur()
+                    self.balon_zaman = self.kok.after(4000, self.balon_gizle)
+                    return
+                _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
+                _mci("play cevap", None, 0, None)
+                self.ses_yol = yol
+                self.oynat_btn.config(text="■")
+        self.kok.after(120, self.cal_bak, no)
 
     def dur(self):
         self.ses_no += 1
-        self.caliyor = False
+        self.caliyor = self.bekle = False
         _mci("close cevap", None, 0, None)
-        if getattr(self, "ses_yol", None):
-            try:
-                os.remove(self.ses_yol)
-            except OSError:
-                pass
-            self.ses_yol = None
+        for yol in [getattr(self, "ses_yol", None)] + getattr(self, "sira", []):
+            if yol:
+                sil(yol)
+        self.ses_yol, self.sira = None, []
         self.oynat_btn.config(text="▶")
 
     def balon_gizle(self):
+        if self.bekle:  # ▶'ye basılmadan baloncuk kapandı: hazırlanan sesi at
+            self.dur()
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_HIDE)
 
     def kisayol_dinle(self):
