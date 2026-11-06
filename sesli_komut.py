@@ -149,6 +149,77 @@ def damla_resmi(kenar, renk, cubuklar=None, olcek=1.0, cekim=0.0, kayma=0.0):
     return im.resize((im.width // SS, im.height // SS), Image.LANCZOS)
 
 
+OW, OR = 60, 15      # oynat topunun penceresi (halkalar için pay) ve cam topun yarıçapı
+OYNAT_STIL = "dalga"  # sade: nefes alır · dalga: dışa halka yayar · jole: esneyip sallanır
+
+
+@functools.lru_cache(maxsize=256)
+def cam_top(renk, rx, ry):
+    """Damlayla aynı buzlu cam görünüşte serbest top (rx, ry: 1x yarıçaplar), SS kat büyüklükte RGBA."""
+    W = int((max(rx, ry) + 2) * 2 * SS)
+    yy, xx = np.mgrid[0:W, 0:W].astype(np.float32)
+    c, RX, RY = W / 2, rx * SS, ry * SS
+    dn = np.hypot((xx - c) / RX, (yy - c) / RY)
+    ic = dn <= 1
+    uzak = (1 - dn) * min(RX, RY)                          # dış kenara uzaklık
+    t = np.clip((yy - (c - RY)) / (2 * RY), 0, 1)
+    renk_ = np.array([int(renk[i:i + 2], 16) for i in (1, 3, 5)], np.float32)
+    taban = renk_ * 0.75 + 255 * 0.25
+    a = np.where(ic, 185 - 55 * t, 0)
+    kenar_isik = (ic & (uzak < 1.1 * SS)) * (0.9 - 0.7 * t)
+    parlama = ic * 0.55 * np.exp(-(((xx - (c - 0.3 * RX)) / (0.42 * RX)) ** 2 + ((yy - (c - 0.45 * RY)) / (0.24 * RY)) ** 2))
+    golge = (ic & (uzak < 3.5 * SS) & (uzak >= 1.1 * SS)) * 0.15 * t
+    beyaz = np.maximum(kenar_isik, parlama)[..., None]
+    rgb = (taban * (1 - beyaz) + 255 * beyaz) * (1 - golge[..., None])
+    a = a + (255 - a) * beyaz[..., 0] * ic
+    return Image.fromarray(np.dstack([rgb, a]).clip(0, 255).astype(np.uint8), "RGBA")
+
+
+def oynat_resmi(stil, durum, t, olcek=1.0, kx=0.0, ky=0.0, ustunde=False):
+    """Cevabı okutan cam top. durum: hazir (▶), hazirlaniyor (dönen yay), caliyor (ses çubukları, fare üstündeyse ■).
+    t: saniye (animasyon), olcek: belirme yayı, kx/ky: fareye doğru kayma."""
+    im = Image.new("RGBA", (OW * SS, OW * SS), (0, 0, 0, 0))
+    c = ImageDraw.Draw(im)
+    s = lambda *v: [n * SS for n in v]
+    cx, cy = OW / 2 + kx, OW / 2 + ky
+    canli = durum == "caliyor"
+    turuncu = tuple(int(c_ * 0.7 + 255 * 0.3) for c_ in (int(VURGU[i:i + 2], 16) for i in (1, 3, 5)))  # halka: açık turuncu
+    if stil == "dalga" and olcek > 0.9:  # dışa yayılan iki halka; okurken hızlanır
+        for k in range(2):
+            f = (t * (0.9 if canli else 0.45) + k / 2) % 1
+            r = OR + 2 + f * 12
+            c.ellipse(s(cx - r, cy - r, cx + r, cy + r), outline=(*turuncu, int((1 - f) ** 2 * (210 if canli else 150))),
+                      width=int(1.5 * SS))
+    nabiz = 1 + (0.05 * abs(np.sin(t * 6)) if canli else 0.035 * np.sin(t * 2 * np.pi * 0.8))
+    rx = ry = OR * olcek * nabiz
+    if stil == "jole":  # esneyip sallanma: biri uzarken öbürü kısalır
+        w = 0.08 * np.sin(t * 2 * np.pi * (1.7 if canli else 0.7))
+        rx, ry = rx * (1 + w), ry * (1 - w)
+    top = cam_top(VURGU, max(1.0, round(rx * 4) / 4), max(1.0, round(ry * 4) / 4))
+    im.alpha_composite(top, (int(cx * SS - top.width / 2), int(cy * SS - top.height / 2)))
+    beyaz = (255, 255, 255, 245)
+    if olcek < 0.6:
+        pass
+    elif durum == "hazirlaniyor":
+        bas = (t * 400) % 360
+        c.arc(s(cx - 6.5, cy - 6.5, cx + 6.5, cy + 6.5), bas, bas + 260, fill=beyaz, width=int(1.8 * SS))
+    elif canli and ustunde:  # okurken üstüne gelince: durdur
+        c.rounded_rectangle(s(cx - 4.5, cy - 4.5, cx + 4.5, cy + 4.5), radius=1.5 * SS, fill=beyaz)
+    elif canli:
+        for i in range(4):
+            h = 1.5 + 5.5 * (0.5 + 0.5 * np.sin(t * 9 + i * 1.9))
+            x = cx + (i - 1.5) * 4.2
+            c.rounded_rectangle(s(x - 1.2, cy - h, x + 1.2, cy + h), radius=1.2 * SS, fill=beyaz)
+    else:
+        c.polygon(s(cx - 3.5, cy - 6, cx - 3.5, cy + 6, cx + 6.5, cy), fill=beyaz)
+    return im.resize((OW, OW), Image.LANCZOS)
+
+
+def belirme(p):
+    # 0..1 → üstünden aşıp yerine oturan yay (jöle gibi "pop")
+    return 1.0 if p >= 1 else float(1 - np.exp(-6 * p) * np.cos(9 * p))
+
+
 class _BMI(ctypes.Structure):
     _fields_ = [("size", wintypes.DWORD), ("w", wintypes.LONG), ("h", wintypes.LONG), ("planes", wintypes.WORD),
                 ("bits", wintypes.WORD), ("comp", wintypes.DWORD), ("isize", wintypes.DWORD),
@@ -434,17 +505,24 @@ class Uygulama:
         self.balon.attributes("-topmost", True)
         self.balon_yazi = tk.Label(self.balon, bg=KART, fg=YAZI, font=("Segoe UI", 10),
                                    padx=12, pady=6, wraplength=260, justify="left")
-        self.balon_yazi.pack(side="left")
-        # Claude cevabı gelince baloncukta çıkan oynat/durdur tuşu
-        self.oynat_btn = tk.Label(self.balon, text="▶", bg=KART, fg=VURGU, font=("Segoe UI", 12),
-                                  padx=10, cursor="hand2")
-        self.oynat_btn.bind("<Button-1>", lambda e: self.oku())
+        self.balon_yazi.pack()
+        # Claude cevabı gelince damlanın yanında beliren cam ▶ topu (damla gibi katman olarak çizilir)
+        self.oynat = tk.Toplevel(self.kok, cursor="hand2")
+        self.oynat.title("Sesli Komut")
+        self.oynat.overrideredirect(True)
+        self.oynat.attributes("-topmost", True)
+        self.oynat.geometry(f"{OW}x{OW}+0+0")
+        self.oynat.bind("<ButtonRelease-1>", lambda e: self.oku())
+        self.oynat_acik, self.oynat_zaman, self.okx, self.oky = False, None, 0.0, 0.0
         self.kok.update()
         odak_alma(self.mini)
         odak_alma(self.balon)
-        h = kabuk(self.mini)
-        win32gui.SetWindowLong(h, win32con.GWL_EXSTYLE,
-                               win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED)
+        odak_alma(self.oynat)
+        for h in (kabuk(self.mini), kabuk(self.oynat)):
+            win32gui.SetWindowLong(h, win32con.GWL_EXSTYLE,
+                                   win32gui.GetWindowLong(h, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED)
+        # SW_HIDE'dan sonra Windows bu pencereye çizimi reddediyor (hata 87); gizlemek = tamamen saydam kare
+        katmana_bas(kabuk(self.oynat), Image.new("RGBA", (OW, OW)))
         self.balon.attributes("-alpha", 0.95)
         cam_kart(self.balon)
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_HIDE)
@@ -509,6 +587,8 @@ class Uygulama:
                 self.kenar = min((px - sol, "sol"), (sag - px, "sag"), (py - ust, "ust"), (alt - py, "alt"))[1]
             self.damla_yerles((py if self.kenar in ("sag", "sol") else px) - L // 2)
             self.balon_yerlestir()
+            if self.oynat_acik:
+                self.oynat_yerlestir()
 
     def birak(self, e):
         if not self.surukleniyor:
@@ -524,6 +604,7 @@ class Uygulama:
         if self.kok.state() == "normal":
             return self.kok.withdraw()
         self.balon_gizle()
+        self.oynat_gizle()  # panel topun üstüne açılır
         self.kok.update_idletasks()
         g, y_ = self.kok.winfo_reqwidth(), self.kok.winfo_reqheight()
         x, y = self.yanina(g, y_, 10)
@@ -539,20 +620,66 @@ class Uygulama:
         # SW_HIDE ile gizlendikten sonra Tk konumu uygulamıyor (baloncuk ilk yerinde takılıyordu); Windows'a doğrudan ver
         win32gui.SetWindowPos(kabuk(self.balon), win32con.HWND_TOPMOST, x, y, g, y_, win32con.SWP_NOACTIVATE)
 
-    def balon_goster(self, metin, oynat=False, sure=2500):
+    def oynat_yerlestir(self):
+        # damlanın ekrana bakan yanında, biraz yukarıda (durum baloncuğuyla çakışmasın)
+        x, y = self.yanina(OW, OW, EK + 3 - (OW - 2 * OR) // 2)
+        if self.kenar in ("sag", "sol"):
+            y -= L // 2 + 2
+        elif self.kenar in ("ust", "alt"):
+            x -= L // 2 + 2
+        x, y = ekrana_sigdir(x, y, OW, OW)
+        win32gui.SetWindowPos(kabuk(self.oynat), win32con.HWND_TOPMOST, x, y, OW, OW, win32con.SWP_NOACTIVATE)
+
+    def oynat_goster(self, sure=30000):
+        self.oynat_zaman_iptal()
+        if not self.oynat_acik:
+            self.oynat_acik, self.oynat_t0 = True, time.time()
+            self.oynat_yerlestir()
+            self.oynat_ciz()
+        if not self.caliyor or self.bekle:
+            self.oynat_zaman = self.kok.after(sure, self.oynat_gizle)
+
+    def oynat_zaman_iptal(self):
+        if self.oynat_zaman:
+            self.kok.after_cancel(self.oynat_zaman)
+            self.oynat_zaman = None
+
+    def oynat_gizle(self):
+        self.oynat_zaman_iptal()
+        if self.bekle:  # ▶'ye basılmadan kapandı: hazırlanan sesi at
+            self.dur()
+        self.oynat_acik = False
+        katmana_bas(kabuk(self.oynat), Image.new("RGBA", (OW, OW)))  # saydam pikseller tıklamayı da geçirir
+
+    def oynat_ciz(self):
+        t = time.time()
+        if self.caliyor and not self.bekle:
+            durum = "caliyor" if self.ses_yol else "hazirlaniyor"
+        else:
+            durum = "hazir"
+        try:
+            px, py = win32api.GetCursorPos()
+        except Exception:  # kilit ekranında imleç okunamaz
+            px, py = -10 ** 6, -10 ** 6
+        cx, cy = self.oynat.winfo_rootx() + OW / 2, self.oynat.winfo_rooty() + OW / 2
+        uzak = float(np.hypot(px - cx, py - cy))
+        # mıknatıs: fare yaklaşınca top ona doğru birkaç piksel kayar
+        g = max(0.0, 1 - uzak / 130) * 3.5 / max(uzak, 1)
+        self.okx += ((px - cx) * g - self.okx) * 0.25
+        self.oky += ((py - cy) * g - self.oky) * 0.25
+        im = oynat_resmi(OYNAT_STIL, durum, t, belirme((t - self.oynat_t0) / 0.45), self.okx, self.oky, uzak < OR + 3)
+        katmana_bas(kabuk(self.oynat), im)
+
+    def balon_goster(self, metin, sure=2500):
         if self.balon_zaman:
             self.kok.after_cancel(self.balon_zaman)
             self.balon_zaman = None
         if self.kok.state() == "normal":  # panel açıkken durum zaten orada yazıyor
             return
         self.balon_yazi.config(text=metin)
-        if oynat:
-            self.oynat_btn.pack(side="left")
-        else:
-            self.oynat_btn.pack_forget()
         self.balon_yerlestir()
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_SHOWNOACTIVATE)
-        if not (self.kayitta or self.mesgul or (self.caliyor and not self.bekle)):
+        if not (self.kayitta or self.mesgul):
             self.balon_zaman = self.kok.after(sure, self.balon_gizle)
 
     # --- Claude cevabını sesli okuma ---
@@ -569,7 +696,7 @@ class Uygulama:
             self.cevap_zaman = z
             self.dur()
             self.oku(bekle=not self.seslendir)  # okuma kapalıysa da sesi önceden hazırla: ▶ anında çalsın
-            self.balon_goster("Claude cevap verdi", oynat=True, sure=30000)
+            self.oynat_goster()
         self.kok.after(700, self.cevap_bak)
 
     def seslendir_degis(self, ilk=False):
@@ -589,8 +716,7 @@ class Uygulama:
         if self.caliyor:
             if self.bekle:  # ses önceden hazırlanmıştı: ▶ ile başlat
                 self.bekle = False
-                self.oynat_btn.config(text="…")
-                return
+                return self.oynat_zaman_iptal()
             return self.dur()  # okurken ya da hazırlanırken tıklama: durdur
         try:
             with open(CEVAP_DOSYA, encoding="utf-8") as f:
@@ -601,10 +727,8 @@ class Uygulama:
             return
         self.ses_no += 1
         self.caliyor, self.bekle = True, bekle
-        if self.balon_zaman and not bekle:
-            self.kok.after_cancel(self.balon_zaman)
-            self.balon_zaman = None
-        self.oynat_btn.config(text="▶" if bekle else "…")
+        if not bekle:
+            self.oynat_zaman_iptal()
         self.sira, self.ses_yol = [], None
         threading.Thread(target=self.ses_uret, args=(metin, self.ses_no), daemon=True).start()
         self.cal_bak(self.ses_no)
@@ -635,7 +759,8 @@ class Uygulama:
     def ses_hata(self, no):
         if no == self.ses_no:
             self.dur()
-            self.balon_goster("Seslendirilemedi (internet?)", oynat=True, sure=6000)
+            self.oynat_gizle()
+            self.balon_goster("Seslendirilemedi (internet?)", sure=5000)
 
     def cal_bak(self, no):
         # MCI: Windows'un kendi oynatıcısı; ek paket gerekmez, açma/çalma/kapama hep bu (Tk) iş parçacığında
@@ -652,12 +777,11 @@ class Uygulama:
                 yol = self.sira.pop(0)
                 if yol is None:
                     self.dur()
-                    self.balon_zaman = self.kok.after(4000, self.balon_gizle)
+                    self.oynat_zaman = self.kok.after(4000, self.oynat_gizle)
                     return
                 _mci(f'open "{yol}" type mpegvideo alias cevap', None, 0, None)
                 _mci("play cevap", None, 0, None)
                 self.ses_yol = yol
-                self.oynat_btn.config(text="■")
         self.kok.after(120, self.cal_bak, no)
 
     def dur(self):
@@ -668,11 +792,8 @@ class Uygulama:
             if yol:
                 sil(yol)
         self.ses_yol, self.sira = None, []
-        self.oynat_btn.config(text="▶")
 
     def balon_gizle(self):
-        if self.bekle:  # ▶'ye basılmadan baloncuk kapandı: hazırlanan sesi at
-            self.dur()
         win32gui.ShowWindow(kabuk(self.balon), win32con.SW_HIDE)
 
     def kisayol_dinle(self):
@@ -723,7 +844,9 @@ class Uygulama:
         if anahtar != self.m_anahtar:  # boştayken her karede değil, değişince bas
             self.m_anahtar = anahtar
             katmana_bas(kabuk(self.mini), damla_resmi(self.kenar, renk, cubuklar, olcek, cekim, kayma))
-        self.kok.after(16 if self.anim or oynuyor else 40, self.ciz)
+        if self.oynat_acik:
+            self.oynat_ciz()
+        self.kok.after(16 if self.anim or oynuyor else 33 if self.oynat_acik else 40, self.ciz)
 
     def yaz_durum(self, metin, son=None):
         self.kok.after(0, self.durum_goster, metin, son)
@@ -768,6 +891,7 @@ class Uygulama:
             self.hedef = self.liste[self.secim.current()][1]
             if self.caliyor:
                 self.dur()  # mikrofon okunan cevabı duymasın
+            self.oynat_gizle()
             self.kayitta = True
             threading.Thread(target=self.dinle, daemon=True).start()
         elif self.cozucu.ad == "yükleniyor":
